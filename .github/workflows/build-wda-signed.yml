@@ -1,0 +1,77 @@
+name: Build Signed WDA IPA
+
+on:
+  workflow_dispatch:
+    inputs:
+      wda_repo:
+        description: 'WDA source repo'
+        required: true
+        default: 'https://github.com/appium/WebDriverAgent.git'
+      wda_branch:
+        description: 'WDA branch'
+        required: true
+        default: 'master'
+      signer_version:
+        description: 'ios-app-signer release tag (pin for reproducibility)'
+        required: true
+        default: 'v1.15.1'
+
+jobs:
+  build-sign:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+
+      - name: Decode certs
+        run: |
+          echo "${{ secrets.P12_B64 }}" | base64 --decode > /tmp/sign.p12
+          echo "${{ secrets.PROFILE_B64 }}" | base64 --decode > /tmp/wda.mobileprovision
+          mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
+          cp /tmp/wda.mobileprovision ~/Library/MobileDevice/Provisioning\ Profiles/
+
+      - name: Clone WDA
+        run: git clone --depth 1 --branch "${{ github.event.inputs.wda_branch }}" "${{ github.event.inputs.wda_repo }}" WDA
+
+      - name: Build WDA (unsigned app)
+        run: |
+          cd WDA
+          xcodebuild build-for-testing \
+            -scheme WebDriverAgentRunner -sdk iphoneos -configuration Release \
+            -derivedDataPath /tmp/wda-derived \
+            CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=NO \
+            PRODUCT_BUNDLE_IDENTIFIER="${{ secrets.WDA_BUNDLE_ID }}"
+
+      - name: Make unsigned ipa
+        run: |
+          cd /tmp/wda-derived/Build/Products/Release-iphoneos
+          APP=$(find . -name '*.app' -maxdepth 1 | head -n1 | basename)
+          if [ -d "$APP/Frameworks" ]; then find "$APP/Frameworks" -name 'XC*' -prune -exec rm -rf {} +; fi
+          mkdir -p Payload && cp -r "$APP" Payload/
+          zip -r /tmp/WDA-unsigned.ipa Payload
+
+      - name: Install ios-app-signer CLI
+        run: |
+          curl -L "https://github.com/dantheman827/ios-app-signer/releases/download/${{ github.event.inputs.signer_version }}/app-signer-mac.zip" -o signer.zip
+          unzip signer.zip -d /tmp/signer
+          SIGNER=$(find /tmp/signer -name 'app-signer-mac' -type f | head -n1)
+          chmod +x "$SIGNER"
+          echo "SIGNER=$SIGNER" >> "$GITHUB_ENV"
+
+      - name: Resign IPA
+        run: |
+          ${{ env.SIGNER }} \
+            --ipa /tmp/WDA-unsigned.ipa \
+            --profile /tmp/wda.mobileprovision \
+            --cert /tmp/sign.p12 \
+            --cert-password "${{ secrets.P12_PASSWORD }}" \
+            --output "$GITHUB_WORKSPACE/WDA-signed.ipa"
+
+      - name: Upload signed artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: WebDriverAgent-Signed-IPA
+          path: WDA-signed.ipa
+          retention-days: 7

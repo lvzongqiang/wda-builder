@@ -1,0 +1,67 @@
+name: Build Unsigned WDA IPA
+
+on:
+  workflow_dispatch:
+    inputs:
+      wda_repo:
+        description: 'WDA source repo'
+        required: true
+        default: 'https://github.com/appium/WebDriverAgent.git'
+      wda_branch:
+        description: 'WDA branch'
+        required: true
+        default: 'master'
+      bundle_id:
+        description: 'Bundle ID (no signing)'
+        required: true
+        default: 'com.yourname.WebDriverAgentRunner'
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+
+      - name: Clone WDA
+        run: |
+          git clone --depth 1 --branch "${{ github.event.inputs.wda_branch }}" "${{ github.event.inputs.wda_repo }}" WDA
+
+      - name: Build WDA (build-for-testing, unsigned)
+        run: |
+          cd WDA
+          xcodebuild build-for-testing \
+            -scheme WebDriverAgentRunner \
+            -sdk iphoneos \
+            -configuration Release \
+            -derivedDataPath /tmp/wda-derived \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            PRODUCT_BUNDLE_IDENTIFIER="${{ github.event.inputs.bundle_id }}"
+          echo "=== DerivedData products ==="
+          ls -R /tmp/wda-derived/Build/Products/Release-iphoneos || true
+
+      - name: Package IPA (unsigned)
+        run: |
+          cd /tmp/wda-derived/Build/Products/Release-iphoneos
+          APP=$(find . -name '*.app' -maxdepth 1 | head -n1)
+          APP=$(basename "$APP")
+          # iOS17+ 必须删 Frameworks 里 XC 开头文件，否则重签后 xctest 起不来
+          if [ -d "$APP/Frameworks" ]; then
+            find "$APP/Frameworks" -name 'XC*' -prune -exec rm -rf {} +
+          fi
+          mkdir -p Payload
+          cp -r "$APP" Payload/
+          zip -r WDA-unsigned.ipa Payload
+          mv WDA-unsigned.ipa "$GITHUB_WORKSPACE/"
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: WebDriverAgent-Unsigned-IPA
+          path: WDA-unsigned.ipa
+          retention-days: 7
