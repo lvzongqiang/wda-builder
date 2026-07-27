@@ -69,6 +69,21 @@ jobs:
             --cert-password "${{ secrets.P12_PASSWORD }}" \
             --output "$GITHUB_WORKSPACE/WDA-signed.ipa"
 
+      - name: Deep re-sign (ensure nested xctest is signed)
+        run: |
+          KEYCHAIN="$HOME/Library/Keychains/login.keychain-db"
+          security import /tmp/sign.p12 -k "$KEYCHAIN" -P "${{ secrets.P12_PASSWORD }}" -T /usr/bin/codesign -T /usr/bin/security 2>/dev/null || true
+          security set-key-partition-list -S apple-tool:,apple: -s -k "${{ secrets.P12_PASSWORD }}" "$KEYCHAIN" 2>/dev/null || true
+          CERT=$(security find-identity -v -p codesigning | grep -oE '"[^"]+"' | head -n1 | tr -d '"')
+          echo "Using cert: $CERT"
+          rm -rf /tmp/resign && mkdir -p /tmp/resign
+          cd /tmp/resign
+          unzip -o "$GITHUB_WORKSPACE/WDA-signed.ipa"
+          APP=$(find Payload -name '*.app' -maxdepth 1 | head -n1)
+          codesign --force --deep --sign "$CERT" "$APP"
+          rm -f "$GITHUB_WORKSPACE/WDA-signed.ipa"
+          zip -r "$GITHUB_WORKSPACE/WDA-signed.ipa" Payload
+
       - name: Upload signed artifact
         uses: actions/upload-artifact@v4
         with:
